@@ -1,0 +1,38 @@
+name: Generate BVC Social Videos
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * 1-6'
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
+        run: pip install edge-tts pillow requests
+
+      - name: Generate videos and schedule posts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHL_API_KEY: ${{ secrets.GHL_API_KEY }}
+        run: python3 generate_post_videos.py
+
+      - name: Upload video artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bvc-videos-${{ github.run_number }}
+          path: out/*.mp4
+          retention-days: 7
