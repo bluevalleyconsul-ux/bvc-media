@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-BVC Social Video Generator v6.1
-GitHub API upload (free) -> raw.githubusercontent.com URLs -> GHL schedule
-Fix: os.environ 'or' fallback avoids empty-string from undefined secrets
+BVC Social Video Generator v7.0
+Free Multi-CDN: Backblaze B2 (primary, 10GB free) -> GitHub API (fallback) -> GHL CDN (last resort)
+B2 secrets optional — system works without them (falls back to GitHub)
 """
-import os, sys, time, asyncio, requests, subprocess, base64
+import os, sys, time, asyncio, requests, subprocess, base64, hashlib
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from PIL import Image
 
-# ---- CONFIG (use 'or' so empty env var falls back to hardcoded) ----
+# ---- CONFIG ----
 GHL_KEY  = os.environ.get('GHL_API_KEY') or 'pit-e62a79f2-ec35-476f-9ad6-20b13d4ef298'
 LOC_ID   = 'DTacLMrxrP6l6lwZzEXS'
 USER_ID  = 'V28tkh3UNvOFjW0VPeNY'
@@ -23,6 +23,11 @@ GH_OWNER = 'bluevalleyconsul-ux'
 GH_REPO  = 'bvc-media'
 FALLBACK = 'https://assets.cdn.filesafe.space/DTacLMrxrP6l6lwZzEXS/media/967984b9-90ea-4369-b445-6f00d1c56183.mp4'
 
+# ---- BACKBLAZE B2 (optional — free 10GB, $0 egress via Cloudflare) ----
+B2_KEY_ID  = os.environ.get('B2_KEY_ID')  or ''
+B2_APP_KEY = os.environ.get('B2_APP_KEY') or ''
+B2_BUCKET  = os.environ.get('B2_BUCKET')  or 'bvc-videos'
+
 # ---- DYNAMIC SCHEDULE: tomorrow 14:00-23:00 UTC ----
 _now  = datetime.now(timezone.utc)
 _base = (_now + timedelta(days=1)).date()
@@ -30,8 +35,8 @@ def sched(hour, extra_min=0):
     dt = datetime(_base.year, _base.month, _base.day, hour, extra_min, 0, tzinfo=timezone.utc)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
-print('BVC v6.1 | GHL_KEY={} | base={}'.format(GHL_KEY[:20], _base))
-print('GH_TOKEN: {}'.format('SET({})'.format(len(GH_TOKEN)) if GH_TOKEN else 'MISSING'))
+print('BVC v7.0 | key={} | base={}'.format(GHL_KEY[:20], _base))
+print('CDN: B2={} | GH={}'.format('READY' if B2_KEY_ID else 'skip', 'READY' if GH_TOKEN else 'missing'))
 
 # ---- POST DATA ----
 POSTS = [
@@ -92,68 +97,149 @@ def make_vid(img, audio, out):
     if r.returncode != 0: raise RuntimeError('ffmpeg: '+r.stderr[-150:])
     print('  [VID] {}KB'.format(os.path.getsize(out)//1024))
 
+# ============================================================
+# BACKBLAZE B2 — free 10GB, no egress fees, native API v2
+# ============================================================
+def upload_to_b2(path, fname):
+    """Upload to Backblaze B2 public bucket. Returns CDN URL or None on failure."""
+    if not B2_KEY_ID or not B2_APP_KEY:
+        return None
+    try:
+        # Step 1: Authorize account
+        creds = base64.b64encode('{}:{}'.format(B2_KEY_ID, B2_APP_KEY).encode()).decode()
+        auth = requests.get(
+            'https://api.backblazeb2.com/b2api/v2/b2_authorize_account',
+            headers={'Authorization': 'Basic {}'.format(creds)}, timeout=15
+        ).json()
+        if 'apiUrl' not in auth:
+            raise RuntimeError('auth failed: {}'.format(auth.get('message','?')))
+        api_url    = auth['apiUrl']
+        auth_token = auth['authorizationToken']
+        dl_url     = auth['downloadUrl']  # e.g. https://f005.backblazeb2.com
+
+        # Step 2: Get bucket ID
+        bl = requests.post(
+            '{}/b2api/v2/b2_list_buckets'.format(api_url),
+            headers={'Authorization': auth_token},
+            json={'accountId': auth['accountId'], 'bucketName': B2_BUCKET},
+            timeout=15
+        ).json()
+        if not bl.get('buckets'):
+            raise RuntimeError('bucket "{}" not found'.format(B2_BUCKET))
+        bucket_id = bl['buckets'][0]['bucketId']
+
+        # Step 3: Get upload URL
+        up = requests.post(
+            '{}/b2api/v2/b2_get_upload_url'.format(api_url),
+            headers={'Authorization': auth_token},
+            json={'bucketId': bucket_id}, timeout=15
+        ).json()
+
+        # Step 4: Upload with SHA1 verification
+        with open(path, 'rb') as f:
+            data = f.read()
+        sha1 = hashlib.sha1(data).hexdigest()
+        res = requests.post(
+            up['uploadUrl'],
+            headers={
+                'Authorization':       up['authorizationToken'],
+                'X-Bz-File-Name':      fname,
+                'Content-Type':        'video/mp4',
+                'Content-Length':      str(len(data)),
+                'X-Bz-Content-Sha1':   sha1
+            },
+            data=data, timeout=120
+        ).json()
+        if 'fileId' not in res:
+            raise RuntimeError('upload failed: {}'.format(res.get('message','?')))
+
+        pub = '{}/file/{}/{}'.format(dl_url, B2_BUCKET, fname)
+        print('  [B2] {}B -> {}'.format(res.get('contentLength','?'), pub))
+        return pub
+
+    except Exception as e:
+        print('  [B2] FAIL: {} -> trying GitHub...'.format(e))
+        return None
+
+# ============================================================
+# GITHUB API — always available in Actions (GITHUB_TOKEN auto)
+# ============================================================
 def upload_github(path, fname):
-    if not GH_TOKEN: raise RuntimeError('GITHUB_TOKEN missing')
+    if not GH_TOKEN:
+        raise RuntimeError('GITHUB_TOKEN missing')
     api = 'https://api.github.com/repos/{}/{}/contents/media/{}'.format(GH_OWNER, GH_REPO, fname)
-    with open(path,'rb') as f:
+    with open(path, 'rb') as f:
         b64 = base64.b64encode(f.read()).decode()
     r = requests.put(api,
-        headers={'Authorization':'token '+GH_TOKEN,'Accept':'application/vnd.github.v3+json'},
-        json={'message':'Add '+fname,'content':b64}, timeout=120)
-    if r.status_code not in (200,201):
-        raise RuntimeError('GH upload HTTP {}: {}'.format(r.status_code, r.text[:80]))
-    raw = 'https://raw.githubusercontent.com/{}/{}/main/media/{}'.format(GH_OWNER,GH_REPO,fname)
+        headers={'Authorization': 'token '+GH_TOKEN,
+                 'Accept': 'application/vnd.github.v3+json'},
+        json={'message': 'Add '+fname, 'content': b64}, timeout=120)
+    if r.status_code not in (200, 201):
+        raise RuntimeError('HTTP {}: {}'.format(r.status_code, r.text[:80]))
+    raw = 'https://raw.githubusercontent.com/{}/{}/main/media/{}'.format(GH_OWNER, GH_REPO, fname)
     print('  [GH] {} -> {}'.format(r.status_code, raw))
     return raw
 
+# ============================================================
+# UPLOAD CHAIN: B2 -> GitHub -> GHL CDN
+# ============================================================
 def upload(path, fname):
-    try: return upload_github(path, fname)
+    url = upload_to_b2(path, fname)       # 1. Backblaze B2 (free 10GB)
+    if url:
+        return url
+    try:
+        return upload_github(path, fname)  # 2. GitHub raw (always free)
     except Exception as e:
-        print('  [GH] FAIL: {} -> fallback'.format(e))
-        return FALLBACK
+        print('  [GH] FAIL: {} -> GHL CDN'.format(e))
+    return FALLBACK                        # 3. GHL CDN static (last resort)
 
-H = {'Authorization':'Bearer '+GHL_KEY,
-     'Content-Type':'application/json','Version':'2021-07-28'}
+H = {'Authorization': 'Bearer '+GHL_KEY,
+     'Content-Type': 'application/json', 'Version': '2021-07-28'}
 
 def ghl_post(acct, vurl, caption, scheduled, extra=None):
-    body = {'accountIds':[acct],'summary':caption,
-            'media':[{'url':vurl,'type':'video/mp4','thumbnail':'','defaultThumb':''}],
-            'status':'scheduled','scheduleDate':scheduled,
-            'type':'post','userId':USER_ID}
-    if extra: body.update(extra)
+    body = {'accountIds': [acct], 'summary': caption,
+            'media': [{'url': vurl, 'type': 'video/mp4', 'thumbnail': '', 'defaultThumb': ''}],
+            'status': 'scheduled', 'scheduleDate': scheduled,
+            'type': 'post', 'userId': USER_ID}
+    if extra:
+        body.update(extra)
     r = requests.post(GHL_BASE+'/social-media-posting/'+LOC_ID+'/posts',
                       headers=H, json=body, timeout=30)
     print('  GHL {} | {}'.format(r.status_code, r.text[:80]))
-    if r.status_code not in (200,201):
-        raise RuntimeError('GHL error {}: {}'.format(r.status_code, r.text[:120]))
+    if r.status_code not in (200, 201):
+        raise RuntimeError('GHL {} {}'.format(r.status_code, r.text[:100]))
     return r.status_code
 
 def main():
     os.makedirs('out', exist_ok=True)
     ts = int(time.time())
-    print('\nBVC v6.1 | {} posts | base={} | ts={}\n'.format(len(POSTS), _base, ts))
+    mode = 'B2+GitHub+GHL' if B2_KEY_ID else 'GitHub+GHL'
+    print('\nBVC v7.0 | {} posts | base={} | ts={} | CDN={}'.format(
+          len(POSTS), _base, ts, mode))
     results = []
     for i, (img_url, tts_text, caption, hour) in enumerate(POSTS, 1):
         tk_s = sched(hour)
         ig_s = sched(hour, 5)
         fb_s = sched(hour, 10)
-        a = 'out/a{}.mp3'.format(i)
-        j = 'out/i{}.jpg'.format(i)
-        v = 'out/v{}.mp4'.format(i)
+        a  = 'out/a{}.mp3'.format(i)
+        j  = 'out/i{}.jpg'.format(i)
+        v  = 'out/v{}.mp4'.format(i)
         fn = 'bvc_{}_{:02d}.mp4'.format(ts, i)
-        print('\n{}\nPOST {}/10 TK={}\n{}'.format('='*55, i, tk_s, '='*55))
+        print('\n{}\nPOST {}/10 | TK={} | CDN={}\n{}'.format(
+              '='*55, i, tk_s, mode, '='*55))
         ok = True
         try:
             tts_gen(tts_text, a)
             dl_img(img_url, j)
             make_vid(j, a, v)
             vurl = upload(v, fn)
-            print('  Video: {}'.format(vurl))
+            print('  URL: {}'.format(vurl))
             ghl_post(TK_ACCT, vurl, caption, tk_s,
-                     {'tiktokPostDetails':{'privacyLevel':'PUBLIC_TO_EVERYONE',
-                                           'enableComment':True,'enableDuet':True,'enableStitch':True}})
+                     {'tiktokPostDetails': {'privacyLevel': 'PUBLIC_TO_EVERYONE',
+                                            'enableComment': True, 'enableDuet': True,
+                                            'enableStitch': True}})
             ghl_post(IG_ACCT, vurl, caption, ig_s,
-                     {'instagramPostDetails':{'type':'reel','showOnFeed':True}})
+                     {'instagramPostDetails': {'type': 'reel', 'showOnFeed': True}})
             ghl_post(FB_ACCT, vurl, caption, fb_s)
             print('  POST {} OK'.format(i))
         except Exception as e:
@@ -162,11 +248,11 @@ def main():
         results.append(ok)
         time.sleep(3)
     ok_n = sum(results)
-    print('\n{}\nDONE {}/{} OK'.format('='*55, ok_n, len(POSTS)))
-    for idx,r in enumerate(results,1):
-        print('  {:2d}. {}'.format(idx,'OK' if r else 'FAIL'))
+    print('\n{}\nDONE {}/{} | CDN={}'.format('='*55, ok_n, len(POSTS), mode))
+    for idx, r in enumerate(results, 1):
+        print('  {:2d}. {}'.format(idx, 'OK' if r else 'FAIL'))
     print('='*55)
-    sys.exit(0 if ok_n==len(POSTS) else 1)
+    sys.exit(0 if ok_n == len(POSTS) else 1)
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
