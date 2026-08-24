@@ -2,6 +2,10 @@ name: Generate BVC Social Videos
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.trigger'
   schedule:
     - cron: '0 12 * * 1-6'
 
