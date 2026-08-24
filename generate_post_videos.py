@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-BVC Social Video Generator v6.0
+BVC Social Video Generator v6.1
 GitHub API upload (free) -> raw.githubusercontent.com URLs -> GHL schedule
-No external services. Unique video per post. Dynamic dates.
+Fix: os.environ 'or' fallback avoids empty-string from undefined secrets
 """
 import os, sys, time, asyncio, requests, subprocess, base64
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from PIL import Image
 
-# ---- CONFIG ----
-GHL_KEY  = os.environ.get('GHL_API_KEY', 'pit-e62a79f2-ec35-476f-9ad6-20b13d4ef298')
+# ---- CONFIG (use 'or' so empty env var falls back to hardcoded) ----
+GHL_KEY  = os.environ.get('GHL_API_KEY') or 'pit-e62a79f2-ec35-476f-9ad6-20b13d4ef298'
 LOC_ID   = 'DTacLMrxrP6l6lwZzEXS'
 USER_ID  = 'V28tkh3UNvOFjW0VPeNY'
 VOICE    = 'en-US-JennyNeural'
@@ -18,7 +18,7 @@ TK_ACCT  = '6a8a64b7420254dd1829bde0_DTacLMrxrP6l6lwZzEXS_000mxYTwYvZ2tReVszHUrT
 IG_ACCT  = '6a85c05ed4b88212be124fe4_DTacLMrxrP6l6lwZzEXS_17841431864857525'
 FB_ACCT  = '6a85d61b8665eb87e71baa29_DTacLMrxrP6l6lwZzEXS_1301490373043749_page'
 GHL_BASE = 'https://services.leadconnectorhq.com'
-GH_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+GH_TOKEN = os.environ.get('GITHUB_TOKEN') or ''
 GH_OWNER = 'bluevalleyconsul-ux'
 GH_REPO  = 'bvc-media'
 FALLBACK = 'https://assets.cdn.filesafe.space/DTacLMrxrP6l6lwZzEXS/media/967984b9-90ea-4369-b445-6f00d1c56183.mp4'
@@ -30,194 +30,143 @@ def sched(hour, extra_min=0):
     dt = datetime(_base.year, _base.month, _base.day, hour, extra_min, 0, tzinfo=timezone.utc)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
-print('BVC v6.0 | Schedule base: {} UTC'.format(_base))
-print('GHL_KEY={} | GH_TOKEN={}'.format(GHL_KEY[:20], 'SET' if GH_TOKEN else 'MISSING'))
+print('BVC v6.1 | GHL_KEY={} | base={}'.format(GHL_KEY[:20], _base))
+print('GH_TOKEN: {}'.format('SET({})'.format(len(GH_TOKEN)) if GH_TOKEN else 'MISSING'))
 
-# ---- POST DATA: (img_url, tts, caption, utc_hour) ----
+# ---- POST DATA ----
 POSTS = [
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504603318/d839dfc5-7be5-4ef2-a681-a2eefc63351d.png',
-  'Breaking. Millions in unclaimed Florida foreclosure surplus is sitting in government accounts right now. If your home was foreclosed in the last five years and sold for more than you owed, that money may be yours. Average claim: thirty to one hundred fifty thousand dollars. Zero upfront. D M CLAIM for a free case review. Blue Valley Consult.',
-  'BREAKING: Millions in unclaimed foreclosure surplus RIGHT NOW.\nForeclosed in last 5 yrs? That money is YOURS.\nAvg $30K-$150K. Zero upfront.\nDM CLAIM - Free review.\n#ExcessFunds #ForeclosureRecovery #BlueValleyConsult',
-  14
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596968/a8f06242-d827-4f2f-b9ea-b80cd30b0f39.png',
-  'Why did not the bank tell you about your surplus? Because they did not have to. When your home sold at foreclosure for more than you owed, the rest went into a government trust account. That money belongs to YOU. D M WHY for a free five minute review. Blue Valley Consult.',
-  'Why did the bank NOT tell you?\nThat surplus went to a government account. It is YOURS.\nDM WHY - Free 5 min review.\n#ExcessFunds #KnowYourRights #FloridaLaw #BlueValleyConsult',
-  15
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596950/2bcfbc17-f52a-4b76-a91f-c24340ac20a4.png',
-  'How much time do you have to claim your surplus? Every Florida county has a different deadline. Some close in one year. Some in five. Once the deadline passes, the state keeps your money forever. D M DEADLINE for a free check. Blue Valley Consult.',
-  'How much time do you HAVE?\nEvery FL county = different deadline.\nOnce it passes state keeps it FOREVER.\nDM DEADLINE - Free check 5 min.\n#LegalDeadline #FloridaLaw #ActNow #BlueValleyConsult',
-  16
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504602806/23c4c682-b6e8-4654-b4fb-b56c7e513687.png',
-  'Four simple steps after you call Blue Valley Consult. We pull your case on the phone. If surplus exists we send our agreement same day. You sign we file. Sixty to one hundred twenty days later your check arrives. Zero upfront. D M CALL. Blue Valley Consult.',
-  '4 steps after you call BVC:\n1. Pull case live 5 min\n2. Agreement same day\n3. You sign, we file\n4. Check in 60-120 days\nDM CALL - Zero upfront.\n#TheProcess #ExcessFunds #BlueValleyConsult',
-  17
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504603357/b7072396-78b7-43b7-b47e-c88c90485338.png',
-  'Real Florida homeowners. Real money recovered. Broward County ninety four thousand dollars. Miami Dade sixty seven thousand five hundred. Palm Beach one hundred thirty one thousand dollars. D M RESULTS for your free eligibility check. Blue Valley Consult.',
-  'Real FL clients. Real checks.\n$94K Broward | $67.5K Miami-Dade | $131K Palm Beach\nDM RESULTS - Free eligibility check.\n#ClientWins #RealResults #ExcessFunds #BlueValleyConsult',
-  18
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596844/80478d72-464c-4193-9086-8f0e33505729.png',
-  'You only need four documents. Proof of identity. Proof you were the homeowner. Your foreclosure case number which we can find for you. Your signature. That is all. We handle everything else. Zero upfront. D M DOCS to start today. Blue Valley Consult.',
-  'Only 4 documents to start:\nID + Proof of ownership + Case number + Signature\nWe handle the rest. Zero upfront.\nDM DOCS - Start today.\n#SimpleProcess #ExcessFunds #BlueValleyConsult',
-  19
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504594834/e785991c-6d21-47e0-8234-e43ffe5e286c.png',
-  'The bank foreclosed your home. The court sold it. The surplus disappeared. Or did it? In Florida that money goes into a government account and it is legally yours. D M SURPLUS for a free check. Blue Valley Consult.',
-  'Bank foreclosed. Court sold. Surplus disappeared.\nOR DID IT?\nIn FL it goes to a government account. It is YOURS.\nDM SURPLUS - Free check 5 min.\n#DontLetThemKeepIt #ExcessFunds #BlueValleyConsult',
-  20
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504602383/faae6812-9e6c-4043-96d4-dde398747af3.png',
-  'Most foreclosure attorneys will not take your surplus case. Blue Valley Consult specializes exclusively in excess funds recovery. Five star rated. Number one for three years running. Five hundred plus cases across all sixty seven Florida counties. D M SPECIALIST. Blue Valley Consult.',
-  'Most attorneys will not take your case.\nWe ONLY do excess funds. 5 Stars | #1 | 500+ Cases | All 67 FL counties.\nDM SPECIALIST - Free review.\n#Specialist #ExcessFunds #BlueValleyConsult',
-  21
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504627925/ef1465bd-08d4-46f9-841f-8af27e1e52e1.png',
-  'This week only. Ten free priority case review slots available. We pull your records on the call in five minutes. We tell you exactly how much surplus may exist. We start your claim same day. Zero upfront. D M PRIORITY right now. Blue Valley Consult.',
-  'THIS WEEK ONLY - 10 Free Priority Slots\nPull records live 5 min, know your surplus, start claim same day.\nDM PRIORITY - Slots filling fast.\n#LimitedSlots #ActNow #ExcessFunds #BlueValleyConsult',
-  22
-),
-(
-  'https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504630297/9e847782-6c74-4671-837f-2fb29a79fefc.png',
-  'This is your final chance. If your home was foreclosed in Florida in the last five years there may be money in a government account with your name on it. Average recovery thirty to one hundred fifty thousand dollars. Zero upfront. D M REVIEW right now. Blue Valley Consult.',
-  'FINALE - Last chance to claim what is YOURS.\nAvg $30K-$150K | All 67 FL counties | Zero upfront.\nDM REVIEW RIGHT NOW.\nBlue Valley Consult - FL Foreclosure Specialists\n#FreeConsultation #ActNow #BlueValleyConsult',
-  23
-),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504603318/d839dfc5-7be5-4ef2-a681-a2eefc63351d.png',
+ 'Breaking. Millions in unclaimed Florida foreclosure surplus is sitting in government accounts right now. If your home was foreclosed in the last five years and sold for more than you owed, that money may be yours. Average claim: thirty to one hundred fifty thousand dollars. Zero upfront. D M CLAIM for a free case review. Blue Valley Consult.',
+ 'BREAKING: Millions in unclaimed foreclosure surplus RIGHT NOW.\nForeclosed in last 5 yrs? That money is YOURS.\nAvg $30K-$150K. Zero upfront.\nDM CLAIM - Free review.\n#ExcessFunds #ForeclosureRecovery #BlueValleyConsult', 14),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596968/a8f06242-d827-4f2f-b9ea-b80cd30b0f39.png',
+ 'Why did not the bank tell you about your surplus? Because they did not have to. When your home sold at foreclosure for more than you owed, the rest went into a government trust account. That money belongs to YOU. D M WHY for a free five minute review. Blue Valley Consult.',
+ 'Why did the bank NOT tell you?\nThat surplus went to a government account. It is YOURS.\nDM WHY - Free 5 min review.\n#ExcessFunds #KnowYourRights #FloridaLaw #BlueValleyConsult', 15),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596950/2bcfbc17-f52a-4b76-a91f-c24340ac20a4.png',
+ 'How much time do you have to claim your surplus? Every Florida county has a different deadline. Some close in one year. Some in five. Once the deadline passes the state keeps your money forever. D M DEADLINE for a free check. Blue Valley Consult.',
+ 'How much time do you HAVE?\nEvery FL county = different deadline.\nOnce it passes state keeps it FOREVER.\nDM DEADLINE - Free check 5 min.\n#LegalDeadline #FloridaLaw #ActNow #BlueValleyConsult', 16),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504602806/23c4c682-b6e8-4654-b4fb-b56c7e513687.png',
+ 'Four simple steps after you call Blue Valley Consult. We pull your case on the phone. If surplus exists we send our agreement same day. You sign we file. Sixty to one hundred twenty days later your check arrives. Zero upfront. D M CALL. Blue Valley Consult.',
+ '4 steps after you call BVC:\n1. Pull case live 5 min\n2. Agreement same day\n3. You sign, we file\n4. Check in 60-120 days\nDM CALL - Zero upfront.\n#TheProcess #ExcessFunds #BlueValleyConsult', 17),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504603357/b7072396-78b7-43b7-b47e-c88c90485338.png',
+ 'Real Florida homeowners. Real money recovered. Broward County ninety four thousand dollars. Miami Dade sixty seven thousand five hundred. Palm Beach one hundred thirty one thousand dollars. D M RESULTS for your free eligibility check. Blue Valley Consult.',
+ 'Real FL clients. Real checks.\n$94K Broward | $67.5K Miami-Dade | $131K Palm Beach\nDM RESULTS - Free eligibility check.\n#ClientWins #RealResults #ExcessFunds #BlueValleyConsult', 18),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504596844/80478d72-464c-4193-9086-8f0e33505729.png',
+ 'You only need four documents. Proof of identity. Proof you were the homeowner. Your foreclosure case number which we can find for you. Your signature. That is all. We handle everything else. Zero upfront. D M DOCS to start today. Blue Valley Consult.',
+ 'Only 4 documents to start:\nID + Proof of ownership + Case number + Signature\nWe handle the rest. Zero upfront.\nDM DOCS - Start today.\n#SimpleProcess #ExcessFunds #BlueValleyConsult', 19),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504594834/e785991c-6d21-47e0-8234-e43ffe5e286c.png',
+ 'The bank foreclosed your home. The court sold it. The surplus disappeared. Or did it? In Florida that money goes into a government account and it is legally yours. D M SURPLUS for a free check. Blue Valley Consult.',
+ 'Bank foreclosed. Court sold. Surplus disappeared.\nOR DID IT?\nIn FL it goes to a government account. It is YOURS.\nDM SURPLUS - Free check 5 min.\n#DontLetThemKeepIt #ExcessFunds #BlueValleyConsult', 20),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504602383/faae6812-9e6c-4043-96d4-dde398747af3.png',
+ 'Most foreclosure attorneys will not take your surplus case. Blue Valley Consult specializes exclusively in excess funds recovery. Five star rated. Number one for three years running. Five hundred plus cases across all sixty seven Florida counties. D M SPECIALIST. Blue Valley Consult.',
+ 'Most attorneys will not take your case.\nWe ONLY do excess funds. 5 Stars | #1 | 500+ Cases | All 67 FL counties.\nDM SPECIALIST - Free review.\n#Specialist #ExcessFunds #BlueValleyConsult', 21),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504627925/ef1465bd-08d4-46f9-841f-8af27e1e52e1.png',
+ 'This week only. Ten free priority case review slots available. We pull your records on the call in five minutes. We tell you exactly how much surplus may exist. We start your claim same day. Zero upfront. D M PRIORITY right now. Blue Valley Consult.',
+ 'THIS WEEK ONLY - 10 Free Priority Slots\nPull records live 5 min, know your surplus, start claim same day.\nDM PRIORITY - Slots filling fast.\n#LimitedSlots #ActNow #ExcessFunds #BlueValleyConsult', 22),
+('https://storage.googleapis.com/crm-conversations-ai-production/ask-ai-images/1787504630297/9e847782-6c74-4671-837f-2fb29a79fefc.png',
+ 'This is your final chance. If your home was foreclosed in Florida in the last five years there may be money in a government account with your name on it. Average recovery thirty to one hundred fifty thousand dollars. Zero upfront. D M REVIEW right now. Blue Valley Consult.',
+ 'FINALE - Last chance to claim what is YOURS.\nAvg $30K-$150K | All 67 FL counties | Zero upfront.\nDM REVIEW RIGHT NOW.\nBlue Valley Consult - FL Foreclosure Specialists\n#FreeConsultation #ActNow #BlueValleyConsult', 23),
 ]
 
-# ---- TTS ----
 async def _tts(text, path):
     import edge_tts
     await edge_tts.Communicate(text, VOICE).save(path)
 
 def tts_gen(text, path):
-    print('  [TTS] Generating...')
+    print('  [TTS] generating...')
     asyncio.run(_tts(text, path))
-    print('  [TTS] {}KB'.format(os.path.getsize(path) // 1024))
+    print('  [TTS] {}KB'.format(os.path.getsize(path)//1024))
 
-# ---- IMAGE ----
 def dl_img(url, out):
-    print('  [IMG] {}...'.format(url[-30:]))
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     img = Image.open(BytesIO(r.content)).convert('RGB')
     img = img.resize((1080, 1920), Image.LANCZOS)
     img.save(out, 'JPEG', quality=95)
-    print('  [IMG] {}KB'.format(os.path.getsize(out) // 1024))
+    print('  [IMG] {}KB'.format(os.path.getsize(out)//1024))
 
-# ---- VIDEO ----
 def make_vid(img, audio, out):
-    print('  [VID] ffmpeg...')
-    cmd = ['ffmpeg', '-y', '-loop', '1', '-framerate', '24', '-i', img,
-           '-i', audio, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
-           '-c:a', 'aac', '-b:a', '128k', '-pix_fmt', 'yuv420p', '-shortest', out]
+    cmd = ['ffmpeg','-y','-loop','1','-framerate','24','-i',img,
+           '-i',audio,'-c:v','libx264','-preset','fast','-crf','28',
+           '-c:a','aac','-b:a','128k','-pix_fmt','yuv420p','-shortest',out]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        raise RuntimeError('ffmpeg: ' + r.stderr[-200:])
-    print('  [VID] {}KB'.format(os.path.getsize(out) // 1024))
+    if r.returncode != 0: raise RuntimeError('ffmpeg: '+r.stderr[-150:])
+    print('  [VID] {}KB'.format(os.path.getsize(out)//1024))
 
-# ---- GITHUB API UPLOAD ----
 def upload_github(path, fname):
-    """Push video to bvc-media/media/{fname} and return raw URL."""
-    if not GH_TOKEN:
-        raise RuntimeError('GITHUB_TOKEN not set')
-    api_url = 'https://api.github.com/repos/{}/{}/contents/media/{}'.format(GH_OWNER, GH_REPO, fname)
-    with open(path, 'rb') as f:
-        content_b64 = base64.b64encode(f.read()).decode()
-    resp = requests.put(
-        api_url,
-        headers={'Authorization': 'token ' + GH_TOKEN,
-                 'Accept': 'application/vnd.github.v3+json'},
-        json={'message': 'Add ' + fname, 'content': content_b64},
-        timeout=120
-    )
-    if resp.status_code not in (200, 201):
-        raise RuntimeError('GitHub upload HTTP {}: {}'.format(resp.status_code, resp.text[:80]))
-    raw_url = 'https://raw.githubusercontent.com/{}/{}/main/media/{}'.format(GH_OWNER, GH_REPO, fname)
-    print('  [GH] {} -> {}'.format(resp.status_code, raw_url))
-    return raw_url
+    if not GH_TOKEN: raise RuntimeError('GITHUB_TOKEN missing')
+    api = 'https://api.github.com/repos/{}/{}/contents/media/{}'.format(GH_OWNER, GH_REPO, fname)
+    with open(path,'rb') as f:
+        b64 = base64.b64encode(f.read()).decode()
+    r = requests.put(api,
+        headers={'Authorization':'token '+GH_TOKEN,'Accept':'application/vnd.github.v3+json'},
+        json={'message':'Add '+fname,'content':b64}, timeout=120)
+    if r.status_code not in (200,201):
+        raise RuntimeError('GH upload HTTP {}: {}'.format(r.status_code, r.text[:80]))
+    raw = 'https://raw.githubusercontent.com/{}/{}/main/media/{}'.format(GH_OWNER,GH_REPO,fname)
+    print('  [GH] {} -> {}'.format(r.status_code, raw))
+    return raw
 
 def upload(path, fname):
-    try:
-        return upload_github(path, fname)
+    try: return upload_github(path, fname)
     except Exception as e:
-        print('  [GH] FAIL: {} | using fallback'.format(e))
+        print('  [GH] FAIL: {} -> fallback'.format(e))
         return FALLBACK
 
-# ---- GHL POST ----
-H = {'Authorization': 'Bearer ' + GHL_KEY,
-     'Content-Type': 'application/json', 'Version': '2021-07-28'}
+H = {'Authorization':'Bearer '+GHL_KEY,
+     'Content-Type':'application/json','Version':'2021-07-28'}
 
 def ghl_post(acct, vurl, caption, scheduled, extra=None):
-    body = {'accountIds': [acct], 'summary': caption,
-            'media': [{'url': vurl, 'type': 'video/mp4', 'thumbnail': '', 'defaultThumb': ''}],
-            'status': 'scheduled', 'scheduleDate': scheduled,
-            'type': 'post', 'userId': USER_ID}
-    if extra:
-        body.update(extra)
-    r = requests.post(GHL_BASE + '/social-media-posting/' + LOC_ID + '/posts',
+    body = {'accountIds':[acct],'summary':caption,
+            'media':[{'url':vurl,'type':'video/mp4','thumbnail':'','defaultThumb':''}],
+            'status':'scheduled','scheduleDate':scheduled,
+            'type':'post','userId':USER_ID}
+    if extra: body.update(extra)
+    r = requests.post(GHL_BASE+'/social-media-posting/'+LOC_ID+'/posts',
                       headers=H, json=body, timeout=30)
-    return r.status_code, r.text[:80]
+    print('  GHL {} | {}'.format(r.status_code, r.text[:80]))
+    if r.status_code not in (200,201):
+        raise RuntimeError('GHL error {}: {}'.format(r.status_code, r.text[:120]))
+    return r.status_code
 
-# ---- MAIN ----
 def main():
     os.makedirs('out', exist_ok=True)
     ts = int(time.time())
-    print('\nBVC v6.0 | {} posts | base={} | ts={}\n'.format(len(POSTS), _base, ts))
+    print('\nBVC v6.1 | {} posts | base={} | ts={}\n'.format(len(POSTS), _base, ts))
     results = []
     for i, (img_url, tts_text, caption, hour) in enumerate(POSTS, 1):
-        tk_s  = sched(hour)
-        ig_s  = sched(hour, 5)
-        fb_s  = sched(hour, 10)
+        tk_s = sched(hour)
+        ig_s = sched(hour, 5)
+        fb_s = sched(hour, 10)
         a = 'out/a{}.mp3'.format(i)
         j = 'out/i{}.jpg'.format(i)
         v = 'out/v{}.mp4'.format(i)
         fn = 'bvc_{}_{:02d}.mp4'.format(ts, i)
-        print('\n{}'.format('='*55))
-        print('POST {}/10 TK={}'.format(i, tk_s))
-        print('='*55)
+        print('\n{}\nPOST {}/10 TK={}\n{}'.format('='*55, i, tk_s, '='*55))
         ok = True
         try:
             tts_gen(tts_text, a)
             dl_img(img_url, j)
             make_vid(j, a, v)
             vurl = upload(v, fn)
-            s1, t1 = ghl_post(TK_ACCT, vurl, caption, tk_s,
-                              {'tiktokPostDetails': {'privacyLevel': 'PUBLIC_TO_EVERYONE',
-                                                     'enableComment': True,
-                                                     'enableDuet': True,
-                                                     'enableStitch': True}})
-            print('  [TK] {} {}'.format(s1, t1))
-            s2, t2 = ghl_post(IG_ACCT, vurl, caption, ig_s,
-                              {'instagramPostDetails': {'type': 'reel', 'showOnFeed': True}})
-            print('  [IG] {} {}'.format(s2, t2))
-            s3, t3 = ghl_post(FB_ACCT, vurl, caption, fb_s)
-            print('  [FB] {} {}'.format(s3, t3))
-            print('  OK  -> {}'.format(vurl))
+            print('  Video: {}'.format(vurl))
+            ghl_post(TK_ACCT, vurl, caption, tk_s,
+                     {'tiktokPostDetails':{'privacyLevel':'PUBLIC_TO_EVERYONE',
+                                           'enableComment':True,'enableDuet':True,'enableStitch':True}})
+            ghl_post(IG_ACCT, vurl, caption, ig_s,
+                     {'instagramPostDetails':{'type':'reel','showOnFeed':True}})
+            ghl_post(FB_ACCT, vurl, caption, fb_s)
+            print('  POST {} OK'.format(i))
         except Exception as e:
             ok = False
-            print('  FAIL -> {}: {}'.format(type(e).__name__, e))
+            print('  POST {} FAIL: {}: {}'.format(i, type(e).__name__, e))
         results.append(ok)
         time.sleep(3)
-    print('\n{}'.format('='*55))
     ok_n = sum(results)
-    print('DONE: {}/{} posts OK'.format(ok_n, len(POSTS)))
-    for idx, ok in enumerate(results, 1):
-        print('  {:2d}. {}'.format(idx, 'OK' if ok else 'FAIL'))
+    print('\n{}\nDONE {}/{} OK'.format('='*55, ok_n, len(POSTS)))
+    for idx,r in enumerate(results,1):
+        print('  {:2d}. {}'.format(idx,'OK' if r else 'FAIL'))
     print('='*55)
-    sys.exit(0 if ok_n == len(POSTS) else 1)
+    sys.exit(0 if ok_n==len(POSTS) else 1)
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()
