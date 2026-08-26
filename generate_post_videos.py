@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-BVC Social Video Generator v7.1
-CDN: Backblaze B2 (primary) -> GitHub raw (IG/FB only) -> GHL CDN (last resort)
-TikTok ONLY posts when B2 is active — GitHub raw rejected by TikTok domain policy.
-Set B2_KEY_ID + B2_APP_KEY secrets to enable TikTok publishing.
+BVC Social Video Generator v7.2
+CDN: Backblaze B2 (primary) -> GHL Media/filesafe (secondary, TikTok-safe) -> GitHub raw (IG/FB fallback)
+MIRROR EFFECT: ONE post -> IG + TK + FB simultaneously (same schedule time)
+TikTok works when B2 OR GHL Media is used (both are verified domains by TikTok)
 """
 import os, sys, time, asyncio, requests, subprocess, base64, hashlib
 from io import BytesIO
@@ -11,36 +11,36 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 # ---- CONFIG ----
-GHL_KEY = os.environ.get('GHL_API_KEY') or 'pit-e62a79f2-ec35-476f-9ad6-20b13d4ef298'
-LOC_ID = 'DTacLMrxrP6l6lwZzEXS'
-USER_ID = 'V28tkh3UNvOFjW0VPeNY'
-VOICE = 'en-US-JennyNeural'
-TK_ACCT = '6a8a64b7420254dd1829bde0_DTacLMrxrP6l6lwZzEXS_000mxYTwYvZ2tReVszHUrTu6InZ5vev5d_business'
-IG_ACCT = '6a85c05ed4b88212be124fe4_DTacLMrxrP6l6lwZzEXS_17841431864857525'
-FB_ACCT = '6a85d61b8665eb87e71baa29_DTacLMrxrP6l6lwZzEXS_1301490373043749_page'
+GHL_KEY  = os.environ.get('GHL_API_KEY') or 'pit-e62a79f2-ec35-476f-9ad6-20b13d4ef298'
+LOC_ID   = 'DTacLMrxrP6l6lwZzEXS'
+USER_ID  = 'V28tkh3UNvOFjW0VPeNY'
+VOICE    = 'en-US-JennyNeural'
+TK_ACCT  = '6a8a64b7420254dd1829bde0_DTacLMrxrP6l6lwZzEXS_000mxYTwYvZ2tReVszHUrTu6InZ5vev5d_business'
+IG_ACCT  = '6a85c05ed4b88212be124fe4_DTacLMrxrP6l6lwZzEXS_17841431864857525'
+FB_ACCT  = '6a85d61b8665eb87e71baa29_DTacLMrxrP6l6lwZzEXS_1301490373043749_page'
 GHL_BASE = 'https://services.leadconnectorhq.com'
 GH_TOKEN = os.environ.get('GITHUB_TOKEN') or ''
 GH_OWNER = 'bluevalleyconsul-ux'
-GH_REPO = 'bvc-media'
+GH_REPO  = 'bvc-media'
 FALLBACK = 'https://assets.cdn.filesafe.space/DTacLMrxrP6l6lwZzEXS/media/967984b9-90ea-4369-b445-6f00d1c56183.mp4'
 
 # ---- BACKBLAZE B2 (optional — free 10GB, $0 egress via Cloudflare) ----
-B2_KEY_ID = os.environ.get('B2_KEY_ID') or ''
+B2_KEY_ID  = os.environ.get('B2_KEY_ID')  or ''
 B2_APP_KEY = os.environ.get('B2_APP_KEY') or ''
-B2_BUCKET = os.environ.get('B2_BUCKET') or 'bvc-videos'
+B2_BUCKET  = os.environ.get('B2_BUCKET')  or 'bvc-videos'
 
 # ---- DYNAMIC SCHEDULE: tomorrow 14:00-23:00 UTC ----
-_now = datetime.now(timezone.utc)
+_now  = datetime.now(timezone.utc)
 _base = (_now + timedelta(days=1)).date()
 def sched(hour, extra_min=0):
     dt = datetime(_base.year, _base.month, _base.day, hour, extra_min, 0, tzinfo=timezone.utc)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
-print('BVC v7.1 | key={} | base={}'.format(GHL_KEY[:20], _base))
-print('CDN: B2={} | GH={} | TK={}'.format(
+print('BVC v7.2 | key={} | base={}'.format(GHL_KEY[:20], _base))
+print('CDN: B2={} | GH={} | MIRROR={}'.format(
     'READY' if B2_KEY_ID else 'skip',
     'READY' if GH_TOKEN else 'missing',
-    'ENABLED' if B2_KEY_ID else 'SKIP-no-B2'
+    'ACTIVE (IG+TK+FB)'
 ))
 
 # ---- POST DATA ----
@@ -117,9 +117,9 @@ def upload_to_b2(path, fname):
             timeout=15
         ).json()
         if 'apiUrl' not in auth: raise RuntimeError('auth failed: {}'.format(auth.get('message','?')))
-        api_url = auth['apiUrl']
+        api_url    = auth['apiUrl']
         auth_token = auth['authorizationToken']
-        dl_url = auth['downloadUrl']
+        dl_url     = auth['downloadUrl']
         bl = requests.post(
             '{}/b2api/v2/b2_list_buckets'.format(api_url),
             headers={'Authorization': auth_token},
@@ -154,11 +154,11 @@ def upload_to_b2(path, fname):
         print(' [B2] {}B -> {}'.format(res.get('contentLength','?'), pub))
         return pub
     except Exception as e:
-        print(' [B2] FAIL: {} -> trying GitHub...'.format(e))
+        print(' [B2] FAIL: {} -> trying GHL Media...'.format(e))
         return None
 
 # ============================================================
-# GITHUB API — IG/FB fallback (NOT used for TikTok)
+# GITHUB API — commits video to repo (permanent archive)
 # ============================================================
 def upload_github(path, fname):
     if not GH_TOKEN: raise RuntimeError('GITHUB_TOKEN missing')
@@ -166,34 +166,93 @@ def upload_github(path, fname):
     with open(path, 'rb') as f:
         b64 = base64.b64encode(f.read()).decode()
     r = requests.put(api,
-        headers={'Authorization': 'token '+GH_TOKEN, 'Accept': 'application/vnd.github.v3+json'},
-        json={'message': 'Add '+fname, 'content': b64},
-        timeout=120)
-    if r.status_code not in (200, 201):
-        raise RuntimeError('HTTP {}: {}'.format(r.status_code, r.text[:80]))
+                     headers={'Authorization': 'token '+GH_TOKEN, 'Accept': 'application/vnd.github.v3+json'},
+                     json={'message': 'Add '+fname, 'content': b64},
+                     timeout=120)
+    if r.status_code not in (200, 201): raise RuntimeError('HTTP {}: {}'.format(r.status_code, r.text[:80]))
     raw = 'https://raw.githubusercontent.com/{}/{}/main/media/{}'.format(GH_OWNER, GH_REPO, fname)
     print(' [GH] {} -> {}'.format(r.status_code, raw))
     return raw
 
 # ============================================================
-# UPLOAD CHAIN: B2 -> GitHub (IG/FB) -> GHL CDN
-# Returns (url, is_b2):
-#   is_b2=True  -> video on B2, safe for ALL platforms incl. TikTok
-#   is_b2=False -> video on GitHub raw or GHL CDN, TikTok will be SKIPPED
+# GHL MEDIA UPLOAD — gets filesafe.space URL (TikTok verified)
+# ============================================================
+def ghl_media_upload(video_url):
+    """Upload video URL to GHL media library. Returns filesafe URL (TikTok-verified) or None."""
+    try:
+        r = requests.post(
+            GHL_BASE + '/medias/add',
+            headers={'Authorization': 'Bearer '+GHL_KEY, 'Content-Type': 'application/json', 'Version': '2021-07-28'},
+            json={'url': video_url, 'altId': LOC_ID, 'altType': 'location'},
+            timeout=30
+        )
+        if r.ok:
+            url = r.json().get('file', {}).get('url')
+            if url:
+                print(' [GHL MEDIA] -> {}'.format(url[:70]))
+                return url
+        print(' [GHL MEDIA] FAIL: {}'.format(r.text[:80]))
+    except Exception as e:
+        print(' [GHL MEDIA] FAIL: {}'.format(e))
+    return None
+
+# ============================================================
+# UPLOAD CHAIN: B2 -> GitHub + GHL Media -> GitHub only
+# Returns (url, is_verified):
+#   True  = filesafe.space or B2, safe for ALL platforms (IG+TK+FB mirror)
+#   False = GitHub raw only, TikTok skipped (IG+FB only)
 # ============================================================
 def upload(path, fname):
-    url = upload_to_b2(path, fname)          # 1. Backblaze B2 (all platforms)
+    # 1. Backblaze B2 (fastest CDN, all platforms)
+    url = upload_to_b2(path, fname)
     if url:
         return url, True
+
+    # 2. Commit to GitHub (permanent archive)
+    github_url = None
     try:
-        return upload_github(path, fname), False  # 2. GitHub raw (IG + FB only)
+        github_url = upload_github(path, fname)
     except Exception as e:
-        print(' [GH] FAIL: {} -> GHL CDN'.format(e))
-        return FALLBACK, False               # 3. GHL CDN static (last resort)
+        print(' [GH] FAIL: {}'.format(e))
+
+    # 3. Upload to GHL Media from GitHub URL -> get filesafe.space (TikTok verified)
+    if github_url:
+        ghl_url = ghl_media_upload(github_url)
+        if ghl_url:
+            return ghl_url, True   # filesafe.space = TikTok verified ✓
+        return github_url, False   # GitHub raw = TikTok skip ✗
+
+    # 4. Last resort static fallback
+    print(' [FALLBACK] using static GHL CDN')
+    return FALLBACK, False
 
 H = {'Authorization': 'Bearer '+GHL_KEY, 'Content-Type': 'application/json', 'Version': '2021-07-28'}
 
+def ghl_post_mirror(vurl, caption, scheduled):
+    """MIRROR EFFECT: ONE post -> IG + TK + FB simultaneously."""
+    body = {
+        'accountIds': [TK_ACCT, IG_ACCT, FB_ACCT],
+        'summary': caption,
+        'media': [{'url': vurl, 'type': 'video/mp4', 'thumbnail': '', 'defaultThumb': ''}],
+        'status': 'scheduled',
+        'scheduleDate': scheduled,
+        'type': 'post',
+        'userId': USER_ID,
+        'instagramPostDetails': {'type': 'reel', 'showOnFeed': True},
+        'tiktokPostDetails': {
+            'privacyLevel': 'PUBLIC_TO_EVERYONE',
+            'enableComment': True,
+            'enableDuet': True,
+            'enableStitch': True
+        }
+    }
+    r = requests.post(GHL_BASE+'/social-media-posting/'+LOC_ID+'/posts', headers=H, json=body, timeout=30)
+    print(' MIRROR {} | {}'.format(r.status_code, r.text[:80]))
+    if r.status_code not in (200, 201): raise RuntimeError('GHL {} {}'.format(r.status_code, r.text[:100]))
+    return r.status_code
+
 def ghl_post(acct, vurl, caption, scheduled, extra=None):
+    """Single-account post (fallback when GHL Media unavailable)."""
     body = {'accountIds': [acct], 'summary': caption,
             'media': [{'url': vurl, 'type': 'video/mp4', 'thumbnail': '', 'defaultThumb': ''}],
             'status': 'scheduled', 'scheduleDate': scheduled, 'type': 'post', 'userId': USER_ID}
@@ -205,53 +264,41 @@ def ghl_post(acct, vurl, caption, scheduled, extra=None):
 
 def main():
     os.makedirs('out', exist_ok=True)
-    ts = int(time.time())
-    tk_enabled = bool(B2_KEY_ID)
-    mode = 'B2+GitHub+GHL' if B2_KEY_ID else 'GitHub+GHL (TikTok=SKIP)'
-    print('\nBVC v7.1 | {} posts | base={} | ts={} | CDN={}'.format(
+    ts   = int(time.time())
+    mode = 'B2+GHL+GitHub' if B2_KEY_ID else 'GHL-Media+GitHub (Mirror active)'
+    print('\nBVC v7.2 | {} posts | base={} | ts={} | CDN={}'.format(
         len(POSTS), _base, ts, mode))
-    if not tk_enabled:
-        print('WARNING: TikTok disabled — B2_KEY_ID secret not set. Set B2_KEY_ID + B2_APP_KEY to enable.\n')
+    print('MIRROR EFFECT: 1 post -> IG + TK + FB simultaneously\n')
 
     results = []
     for i, (img_url, tts_text, caption, hour) in enumerate(POSTS, 1):
-        tk_s = sched(hour)
-        ig_s = sched(hour, 5)
-        fb_s = sched(hour, 10)
-        a = 'out/a{}.mp3'.format(i)
-        j = 'out/i{}.jpg'.format(i)
-        v = 'out/v{}.mp4'.format(i)
+        post_s = sched(hour)   # Single schedule time — all 3 platforms at same moment
+        a  = 'out/a{}.mp3'.format(i)
+        j  = 'out/i{}.jpg'.format(i)
+        v  = 'out/v{}.mp4'.format(i)
         fn = 'bvc_{}_{:02d}.mp4'.format(ts, i)
-        print('\n{}\nPOST {}/10 | TK={} | CDN={}\n{}'.format(
-            '='*55, i, tk_s, mode, '='*55))
+        print('\n{}\nPOST {}/{} | sched={} | CDN={}\n{}'.format(
+            '='*55, i, len(POSTS), post_s, mode, '='*55))
         ok = True
         try:
             tts_gen(tts_text, a)
             dl_img(img_url, j)
             make_vid(j, a, v)
-            vurl, is_b2 = upload(v, fn)
-            print(' URL: {} | B2={}'.format(vurl, is_b2))
+            vurl, is_verified = upload(v, fn)
+            print(' URL: {} | verified={}'.format(vurl, is_verified))
 
-            # TikTok: ONLY post when video is on B2 (GitHub raw domain not verified by TikTok)
-            if is_b2:
-                ghl_post(TK_ACCT, vurl, caption, tk_s, {
-                    'tiktokPostDetails': {
-                        'privacyLevel': 'PUBLIC_TO_EVERYONE',
-                        'enableComment': True,
-                        'enableDuet': True,
-                        'enableStitch': True
-                    }
-                })
-                print(' TK OK')
+            if is_verified:
+                # MIRROR: IG + TK + FB — one shot
+                ghl_post_mirror(vurl, caption, post_s)
+                print(' MIRROR OK -> IG + TK + FB')
             else:
-                print(' TK SKIP: GitHub CDN rejected by TikTok — set B2_KEY_ID + B2_APP_KEY secrets to enable.')
+                # Fallback: IG + FB only (GitHub raw not TikTok-verified)
+                ghl_post(IG_ACCT, vurl, caption, post_s, {
+                    'instagramPostDetails': {'type': 'reel', 'showOnFeed': True}
+                })
+                ghl_post(FB_ACCT, vurl, caption, post_s)
+                print(' POST {} OK (IG+FB only — GHL Media unavailable)'.format(i))
 
-            # Instagram and Facebook: GitHub raw is accepted
-            ghl_post(IG_ACCT, vurl, caption, ig_s, {
-                'instagramPostDetails': {'type': 'reel', 'showOnFeed': True}
-            })
-            ghl_post(FB_ACCT, vurl, caption, fb_s)
-            print(' POST {} OK'.format(i))
         except Exception as e:
             ok = False
             print(' POST {} FAIL: {}: {}'.format(i, type(e).__name__, e))
